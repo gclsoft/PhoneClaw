@@ -384,8 +384,22 @@ struct ConfigurationsView: View {
             .background(Theme.accent.opacity(0.15), in: Capsule())
         case .checkingSource:
             modelBadge(localized("检查中", "Checking"))
-        case .downloading(let completedFiles, let totalFiles, _):
-            modelBadge(localized("下载中 \(completedFiles)/\(totalFiles)", "Downloading \(completedFiles)/\(totalFiles)"))
+        case .downloading(let completedFiles, let totalFiles, _, let bytesDownloaded, let totalBytes):
+            VStack(alignment: .trailing, spacing: 4) {
+                modelBadge(localized("下载中 \(completedFiles)/\(totalFiles)", "Downloading \(completedFiles)/\(totalFiles)"))
+                if totalBytes > 0 {
+                    ProgressView(value: Double(bytesDownloaded), total: Double(totalBytes))
+                        .tint(Theme.accent)
+                        .frame(width: 100)
+                    Text("\(formatBytes(bytesDownloaded)) / \(formatBytes(totalBytes))")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(Theme.textTertiary)
+                } else if bytesDownloaded > 0 {
+                    Text(formatBytes(bytesDownloaded))
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(Theme.textTertiary)
+                }
+            }
         case .downloaded:
             modelBadge(localized("已下载", "Downloaded"), color: Theme.accentGreen)
         case .bundled:
@@ -420,8 +434,11 @@ struct ConfigurationsView: View {
             return localized("未安装", "Not Installed")
         case .checkingSource:
             return localized("正在检查模型下载源。", "Checking the model download source.")
-        case .downloading(_, _, let currentFile):
-            return localized("正在下载：", "Downloading: ") + currentFile
+        case .downloading(_, _, let currentFile, let bytesDownloaded, let totalBytes):
+            let progress = totalBytes > 0
+                ? " (\(formatBytes(bytesDownloaded))/\(formatBytes(totalBytes)))"
+                : (bytesDownloaded > 0 ? " (\(formatBytes(bytesDownloaded)))" : "")
+            return localized("正在下载：", "Downloading: ") + currentFile + progress
         case .downloaded:
             return localized("已下载到手机本地，可直接加载。", "Downloaded on device and ready to load.")
         case .bundled:
@@ -429,6 +446,13 @@ struct ConfigurationsView: View {
         case .failed(let message):
             return message
         }
+    }
+
+    private func formatBytes(_ bytes: Int64) -> String {
+        if bytes < 1_024 { return "\(bytes) B" }
+        if bytes < 1_048_576 { return String(format: "%.0f KB", Double(bytes) / 1_024) }
+        if bytes < 1_073_741_824 { return String(format: "%.1f MB", Double(bytes) / 1_048_576) }
+        return String(format: "%.2f GB", Double(bytes) / 1_073_741_824)
     }
 
     private var modelFooterText: String {

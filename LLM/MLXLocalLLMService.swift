@@ -21,7 +21,7 @@ public struct BundledModelOption: Identifiable, Hashable, Sendable {
 public enum ModelInstallState: Equatable, Sendable {
     case notInstalled
     case checkingSource
-    case downloading(completedFiles: Int, totalFiles: Int, currentFile: String)
+    case downloading(completedFiles: Int, totalFiles: Int, currentFile: String, bytesDownloaded: Int64 = 0, totalBytes: Int64 = 0)
     case downloaded
     case bundled
     case failed(String)
@@ -284,12 +284,14 @@ public class MLXLocalLLMService: LLMEngine {
                         self.modelInstallStates[id] = .downloading(
                             completedFiles: index,
                             totalFiles: totalFiles,
-                            currentFile: file
+                            currentFile: file,
+                            bytesDownloaded: 0,
+                            totalBytes: 0
                         )
                     }
 
                     let request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 1800)
-                    let (temporaryURL, response) = try await URLSession.shared.download(for: request)
+                    let (asyncBytes, response) = try await URLSession.shared.bytes(for: request)
                     guard let http = response as? HTTPURLResponse else {
                         throw DownloadError.invalidResponse
                     }
@@ -297,6 +299,7 @@ public class MLXLocalLLMService: LLMEngine {
                         throw DownloadError.httpStatus(http.statusCode)
                     }
 
+                    let expectedLength = http.expectedContentLength // -1 if unknown
                     let destinationURL = partialDirectory.appendingPathComponent(file)
                     let parentDirectory = destinationURL.deletingLastPathComponent()
                     if !fm.fileExists(atPath: parentDirectory.path) {
@@ -305,7 +308,45 @@ public class MLXLocalLLMService: LLMEngine {
                     if fm.fileExists(atPath: destinationURL.path) {
                         try fm.removeItem(at: destinationURL)
                     }
-                    try fm.moveItem(at: temporaryURL, to: destinationURL)
+
+                    let fileHandle = try FileHandle(forWritingTo: {
+                        fm.createFile(atPath: destinationURL.path, contents: nil)
+                        return destinationURL
+                    }())
+                    var bytesReceived: Int64 = 0
+                    let bufferSize = 256 * 1024 // 256 KB
+                    var buffer = Data()
+                    buffer.reserveCapacity(bufferSize)
+                    var lastProgressUpdate = Date.distantPast
+
+                    for try await byte in asyncBytes {
+                        buffer.append(byte)
+                        if buffer.count >= bufferSize {
+                            fileHandle.write(buffer)
+                            bytesReceived += Int64(buffer.count)
+                            buffer.removeAll(keepingCapacity: true)
+
+                            let now = Date()
+                            if now.timeIntervalSince(lastProgressUpdate) >= 0.3 {
+                                lastProgressUpdate = now
+                                let captured = bytesReceived
+                                await MainActor.run {
+                                    self.modelInstallStates[id] = .downloading(
+                                        completedFiles: index,
+                                        totalFiles: totalFiles,
+                                        currentFile: file,
+                                        bytesDownloaded: captured,
+                                        totalBytes: expectedLength > 0 ? expectedLength : 0
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    if !buffer.isEmpty {
+                        fileHandle.write(buffer)
+                        bytesReceived += Int64(buffer.count)
+                    }
+                    try fileHandle.close()
                 }
 
                 if fm.fileExists(atPath: finalDirectory.path) {
@@ -493,15 +534,16 @@ public class MLXLocalLLMService: LLMEngine {
     }
 
     /// 根据当前剩余内存推荐安全的 history 深度（消息条数）。
-    /// Gemma E2B 每 ~200 token history ≈ ~200 MB 推理峰值，保守估算：
-    ///   headroom > 1500 MB → suffix(4)  最近 2 轮
-    ///   headroom > 900  MB → suffix(2)  最近 1 轮
-    ///   headroom ≤ 900  MB → suffix(0)  无历史（临界状态）
+    /// Gemma E2B 推理峰值（KV cache + activations）约 600-900 MB，
+    /// 必须为此保留足够 headroom 否则会被 jetsam 杀掉。
+    ///   headroom > 2000 MB → suffix(4)  最近 2 轮
+    ///   headroom > 1500 MB → suffix(2)  最近 1 轮
+    ///   headroom ≤ 1500 MB → suffix(0)  无历史（保全推理）
     public var safeHistoryDepth: Int {
         let h = availableHeadroomMB
         switch h {
-        case 1500...: return 4
-        case  900..<1500: return 2
+        case 2000...: return 4
+        case 1500..<2000: return 2
         default: return 0
         }
     }
@@ -640,8 +682,17 @@ public class MLXLocalLLMService: LLMEngine {
                 // allocating the new computation graph. Critical on low-headroom devices:
                 // the follow-up prompt is longer than the first inference,
                 // and without clearing, residual cache + new activations
-                // exceed the 6GB jetsam limit on iPhone.
+                // exceed the jetsam limit on iPhone.
                 MLX.GPU.clearCache()
+
+                // Abort early if headroom is critically low to avoid jetsam kill.
+                // Gemma E2B inference needs ~600-900 MB for KV cache + activations.
+                let preCheckHeadroom = self.availableHeadroomMB
+                if preCheckHeadroom < 500 {
+                    print("[MEM] ⚠️ headroom too low for inference: \(preCheckHeadroom) MB — aborting to avoid jetsam")
+                    continuation.finish(throwing: MLXError.insufficientMemory(availableMB: preCheckHeadroom))
+                    return
+                }
 
                 self.isGenerating = true
                 self.cancelled = false
@@ -776,6 +827,7 @@ enum MLXError: LocalizedError {
     case modelNotLoaded
     case modelDirectoryMissing(String)
     case gpuExecutionRequiresForeground
+    case insufficientMemory(availableMB: Int)
 
     var errorDescription: String? {
         switch self {
@@ -785,6 +837,8 @@ enum MLXError: LocalizedError {
             return "MLX 模型目录不存在: \(path)"
         case .gpuExecutionRequiresForeground:
             return "应用进入后台时，iPhone 不允许继续提交 GPU 推理任务。"
+        case .insufficientMemory(let availableMB):
+            return "内存不足（剩余 \(availableMB) MB），请关闭其他应用后重试。"
         }
     }
 }

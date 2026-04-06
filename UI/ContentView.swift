@@ -415,7 +415,8 @@ struct AIResponseView: View {
 
                 // 回复文本
                 if let text = block.responseText {
-                    Text(text)
+                    let rendered = (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text)
+                    Text(rendered)
                         .font(.system(size: 15))
                         .foregroundStyle(Theme.textPrimary)
                         .textSelection(.enabled)

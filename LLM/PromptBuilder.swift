@@ -182,7 +182,7 @@ struct PromptBuilder {
         请基于以上结果直接回答用户。
         如果上面的内容已经是完整答案，你可以只做最少整理，但不要遗漏关键信息。
         不要重复调用工具，不要反问，不要提到工具名、Skill、status、result、arguments 等字段。
-        不要输出 Markdown 代码块，也不要输出 JSON、键名、模板或中间步骤。
+        不要输出 JSON、键名、模板或中间步骤。可以使用 Markdown 格式（如加粗、列表、标题等）来组织回复。
         不能输出空白。
         <turn|>
         <|turn>model
